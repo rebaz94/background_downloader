@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.annotation.RequiresApi
 import java.io.File
@@ -26,60 +27,65 @@ fun moveToScopedStorage(
         markPending: Boolean,
         deleteTemporaryFile: Boolean,
 ): Boolean {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-        return false
-    }
+    try {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return false
+        }
 
-    val file = File(filePath)
-    if (!file.exists()) {
-        return false
-    }
+        val file = File(filePath)
+        if (!file.exists()) {
+            return false
+        }
 
-    if (!destinationFolder.startsWith("/")) {
-        return false
-    }
+        if (!destinationFolder.startsWith("/")) {
+            return false
+        }
 
-    // Set up the content values for the new file
-    val contentValues = ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
-        put(MediaStore.MediaColumns.MIME_TYPE, getMimeType(file.name))
-        put(MediaStore.MediaColumns.RELATIVE_PATH, getRelativePath(destination, destinationFolder))
+        // Set up the content values for the new file
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+            put(MediaStore.MediaColumns.MIME_TYPE, getMimeType(file.name))
+            put(MediaStore.MediaColumns.RELATIVE_PATH, getRelativePath(destination, destinationFolder))
+            if (markPending) {
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+        }
+
+        // Insert the new file into the MediaStore
+        val resolver = context.contentResolver
+        val uri = resolver.insert(getMediaStoreUri(destination), contentValues)
+
+        // Get an OutputStream to write the contents of the file
+        val os: OutputStream? = uri?.let { resolver.openOutputStream(it) }
+
+        // Write data to the output stream
+        os?.use { output ->
+            FileInputStream(file).use { input ->
+                input.copyTo(output)
+            }
+        }
+
+        // Close the output stream
+        os?.close()
+
+        // If the file is pending, mark it as non-pending
         if (markPending) {
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
+            contentValues.clear()
+            contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            resolver.update(uri!!, contentValues, null, null)
         }
-    }
 
-    // Insert the new file into the MediaStore
-    val resolver = context.contentResolver
-    val uri = resolver.insert(getMediaStoreUri(destination), contentValues)
-
-    // Get an OutputStream to write the contents of the file
-    val os: OutputStream? = uri?.let { resolver.openOutputStream(it) }
-
-    // Write data to the output stream
-    os?.use { output ->
-        FileInputStream(file).use { input ->
-            input.copyTo(output)
+        // Return true if the file was created successfully
+        val created = uri != null
+        if (created && deleteTemporaryFile) {
+            file.delete()
         }
+
+        return created
+    } catch (e: Exception) {
+        Log.e("BackgroundDownloader", e.toString())
+        return false
     }
-
-    // Close the output stream
-    os?.close()
-
-    // If the file is pending, mark it as non-pending
-    if (markPending) {
-        contentValues.clear()
-        contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
-        resolver.update(uri!!, contentValues, null, null)
-    }
-
-    // Return true if the file was created successfully
-    val created = uri != null
-    if (created && deleteTemporaryFile) {
-        file.delete()
-    }
-
-    return created
 }
 
 @RequiresApi(Build.VERSION_CODES.Q)
@@ -106,7 +112,7 @@ private fun getRelativePath(destination: ScopedStorage, destinationFolder: Strin
 }
 
 private fun getMimeType(fileName: String): String {
-    val extension = MimeTypeMap.getFileExtensionFromUrl(fileName)
+    val extension = fileName.substringAfterLast(".", "")
     return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
             ?: "application/octet-stream"
 }
